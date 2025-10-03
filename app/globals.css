@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light dark; }
+html, body { height: 100%; }
+html { scroll-behavior: smooth; }
+:focus-visible { outline: 1px dashed rgba(0,0,0,0.4); outline-offset: 2px; }
+.dark :focus-visible { outline-color: rgba(255,255,255,0.5); }
+.container { @apply mx-auto max-w-7xl px-4; }
+
+/* Clean focus styles for all inputs, textareas, and selects */
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none; /* remove default focus outline */
+  box-shadow: 0;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+
+
+/* Smooth, minimal focus for form controls */
+input:focus, textarea:focus, select:focus,
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+/* Optional: subtle border color change if the element already has a border */
+input:focus, textarea:focus, select:focus {
+  border-color: rgba(0,0,0,0.15);
+}
+.dark input:focus, .dark textarea:focus, .dark select:focus {
+  border-color: rgba(255,255,255,0.2);
+}
+
+
+/* === Admin UI polish === */
+@layer components {
+  .admin-container {@apply mx-auto max-w-6xl px-3 md:px-6 py-6;}
+  .admin-card {@apply rounded-2xl border border-black/10 bg-white/80 p-4 shadow-sm transition-colors dark:border-white/10 dark:bg-neutral-900/60;}
+  .admin-card h2 {@apply text-lg font-semibold;}
+  .admin-grid {@apply grid gap-4 md:gap-6;}
+  .admin-subgrid {@apply grid gap-2 md:grid-cols-2;}
+  .admin-input {@apply rounded-xl border border-black/10 bg-white/90 px-3 py-2 text-sm outline-none transition focus:ring-2 focus:ring-black/10 dark:border-white/10 dark:bg-black/60 dark:focus:ring-white/20;}
+  .admin-checkbox {@apply h-4 w-4 rounded border border-black/20 text-black focus:ring-2 focus:ring-black/20 dark:border-white/20 dark:bg-black;}
+  .admin-btn {@apply rounded-xl border border-black/10 bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90 dark:border-white/10;}
+  .admin-btn-secondary {@apply rounded-xl border border-black/10 bg-white px-4 py-2 text-sm font-medium text-black hover:bg-black/5 dark:border-white/10 dark:bg-transparent dark:text-white dark:hover:bg-white/10;}
+  .admin-list {@apply grid gap-3 sm:grid-cols-2 lg:grid-cols-3;}
+  .admin-item {@apply rounded-xl border border-black/10 bg-white/70 p-3 transition hover:shadow dark:border-white/10 dark:bg-neutral-900/60;}
+  .admin-item h4 {@apply line-clamp-1 font-medium;}
+  .admin-label {@apply text-xs text-neutral-600 dark:text-neutral-300;}
+}
+
+/* Auto-apply nicer inputs/buttons inside admin scope without rewriting every element */
+.admin form input[type="text"],
+.admin form input[type="number"],
+.admin form input[type="email"],
+.admin form input[type="url"],
+.admin form input[type="file"],
+.admin form select,
+.admin form textarea { @apply admin-input; }
+
+.admin form input[type="checkbox"] { @apply admin-checkbox; }
+
+.admin .btn-primary { @apply admin-btn; }
+.admin .btn-secondary { @apply admin-btn-secondary; }
+
+/* Cards inside admin */
+.admin section { @apply admin-card; }

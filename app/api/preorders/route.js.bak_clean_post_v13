@@ -1,0 +1,55 @@
+export async function POST(req){
+  const { NextResponse } = await import('next/server');
+  try{
+
+  await dbConnect();
+  const body = await req.json().catch(() => ({}));
+
+  const { items, customer, advanceDue = 0, isPreorder = true, metadata = {}, payment = {} } = body;
+
+  const isPreOrderFlag = (body?.isPreOrder ?? isPreorder ?? true) ? true : false;
+const name = customer?.name || body?.name || null;
+  const phone = customer?.phone || body?.phone || null;
+  const email = customer?.email || body?.email || null;
+  const address = customer?.address || body?.address || null;
+  const city = customer?.city || body?.city || null;
+
+  if(!phone){
+    return NextResponse.json({ ok:false, error: 'Phone is required' }, { status: 400 });
+  }
+
+  const order = await Order.create({
+items,
+    name, phone, email,
+    address, city,
+    isPreOrder: isPreOrderFlag,
+    preOrderAdvanceAmount: advanceDue,
+    preorder: {
+      advanceDue: Number(advanceDue || 0),
+      advancePaid: 0,
+      advancePaidAt: null,
+      verified: false,
+      uddoktaInvoiceId: null,
+      uddoktaStatus: 'PENDING',
+      txnId: null,
+    },
+    status: 'PENDING',
+    metadata
+  
+});
+
+  // If client already created an invoice upstream, store its id (but do not mark as paid)
+  const hintedInvoiceId = payment?.invoice_id || payment?.invoiceId || metadata?.invoice_id || metadata?.invoiceId || null;
+  if(hintedInvoiceId){
+    order.preorder.uddoktaInvoiceId = hintedInvoiceId;
+    await order.save();
+  }
+
+  return NextResponse.json({ ok:true, orderId: order._id });
+}
+
+  }catch(err){
+    console.error('POST /api/preorders error', err);
+    return NextResponse.json({ ok:false, error: String(err?.message||err) }, { status: 500 });
+  }
+}

@@ -1,0 +1,320 @@
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const fetchCache = 'force-no-store';
+import { NextResponse } from "next/server";
+
+// --- helpers ----------------------------------------------------
+
+async function ensureDB() {
+  const mod = await import("../../../../../lib/db.js").catch(() => import("../../../../../lib/db"));
+  const db = mod?.default ?? mod?.dbConnect ?? mod;
+  if (typeof db === "function") return db();
+  if (db?.dbConnect) return db.dbConnect();
+}
+
+async function loadOrderModel() {
+  const m = await import("../../../../../models/Order.js").catch(() => import("../../../../../models/Order"));
+  return m.default || m.Order || m;
+}
+
+async function loadProductModel() {
+  const m = await import("../../../../../models/Product.js").catch(() => import("../../../../../models/Product"));
+  return m?.default || m?.Product || m;
+}
+
+function findInvoiceId(o){
+  const tryVals = [];
+  if (o?.invoiceId) tryVals.push(o.invoiceId);
+  if (o?.invoice_id) tryVals.push(o.invoice_id);
+  if (o?.payment?.invoice_id) tryVals.push(o.payment.invoice_id);
+  if (o?.uddokta?.invoice_id) tryVals.push(o.uddokta.invoice_id);
+  if (o?.metadata?.invoice_id) tryVals.push(o.metadata.invoice_id);
+  if (o?.metadata?.invoiceId) tryVals.push(o.metadata.invoiceId);
+  if (Array.isArray(o?.payments)) for (const p of o.payments){ if (p?.invoice_id) tryVals.push(p.invoice_id); if (p?.metadata?.invoice_id) tryVals.push(p.metadata.invoice_id); }
+  if (Array.isArray(o?.transactions)) for (const p of o.transactions){ if (p?.invoice_id) tryVals.push(p.invoice_id); if (p?.metadata?.invoice_id) tryVals.push(p.metadata.invoice_id); }
+  return (tryVals.find(v => typeof v === 'string' && v.trim().length >= 6) || null);
+}
+async function verifyUddokta(invoiceId){
+  try{
+    const base = process.env.UDDOKTAPAY_BASE || "https://sandbox.uddoktapay.com";
+    const key = process.env.UDDOKTAPAY_API_KEY || process.env.UDDOKTAPAY_SANDBOX_API_KEY;
+    if(!key) return null;
+    const url = base.replace(/\/$/, "") + "/api/verify-payment";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "RT-UDDOKTAPAY-API-KEY": key
+      },
+      body: JSON.stringify({ invoice_id: invoiceId })
+    });
+    if(!res.ok) return null;
+    const j = await res.json();
+    return j;
+  }catch(e){
+    return null;
+  }
+}
+function deriveProductMeta(o) {
+  const it = Array.isArray(o.items) && o.items[0] ? o.items[0] : null;
+  return {
+    productTitle: o.productTitle || it?.title || it?.name || o.slug || "",
+    productImage: o.productImage || it?.image || (it?.images && it.images[0]) || "",
+    slug: o.slug || it?.slug || "",
+    productId: o.productId || it?.productId || it?._id || null,
+  };
+}
+
+function computeTotals(o) {
+  const toNum = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  // Deep scan for amounts inside an object (used as last-resort)
+  function collectAmountsDeep(obj) {
+    const found = [];
+    const seen = new Set();
+    function walk(x) {
+      if (!x || typeof x !== "object" || seen.has(x)) return;
+      seen.add(x);
+      for (const [k, v] of Object.entries(x)) {
+        if (v && typeof v === "object") walk(v);
+        else {
+          const key = String(k).toLowerCase();
+          if (key.includes("amount") || key.includes("paid")) {
+            const n = toNum(v);
+            if (n > 0) found.push(n);
+          }
+        }
+      }
+    }
+    walk(obj);
+    return found;
+  }
+
+  // 1) Compute TOTAL robustly
+  let itemsSubtotal = 0;
+  if (Array.isArray(o.items)) {
+    for (const it of o.items) {
+      const price = toNum(it?.price ?? it?.unitPrice ?? it?.amount ?? 0);
+      const qty = toNum(it?.qty ?? it?.quantity ?? 1) || 1;
+      itemsSubtotal += price * qty;
+    }
+  }
+  const delivery = toNum(o?.deliveryFee ?? o?.shippingFee ?? o?.deliveryCharge ?? 0);
+  let total =
+    toNum(o?.total ?? o?.grandTotal ?? o?.amount ?? 0) ||
+    (itemsSubtotal + delivery);
+
+  // 2) Sum PAID
+  let paid = 0;
+
+  // 2a) Array-based payments/transactions
+  const txs = Array.isArray(o?.transactions) ? o?.transactions : o?.payments;
+  if (Array.isArray(txs)) {
+    for (const t of txs) {
+      // Normalize a wide range of "good" statuses (case-insensitive + numeric flags)
+      const raw = (t?.status ?? t?.state ?? t?.payment_status ?? t?.paid_status ?? t?.result ?? "").toString().trim();
+      const status = raw.toUpperCase();
+      const okStatus =
+        !status ||
+        ["OK","DONE","CAPTURED","CONFIRMED","APPROVED","SUCCESS","SUCCESSFUL","PAID","COMPLETED","PROCESSING"].includes(status) ||
+        t?.success === true || t?.paid === true || t?.status_code === 200 || t?.code === 200 || t?.ok === true;
+      const badStatus = ["FAILED","CANCELLED","CANCELED","REFUNDED","VOID","ERROR","DECLINED"].includes(status);
+
+      // Preferred explicit fields
+      const candidates = [
+        t?.amount, t?.charged_amount, t?.paid, t?.paid_amount, t?.amount_captured, t?.capture_amount,
+        t?.advance, t?.advance_paid, t?.advanceAmount, t?.advance_amount,
+        t?.trx_amount, t?.transaction_amount
+      ].map(toNum).filter(n => n > 0);
+
+      // Nested gateway response
+      if (t?.gateway_response && typeof t.gateway_response === "object") {
+        const nested = collectAmountsDeep(t.gateway_response);
+        candidates.push(...nested);
+      }
+      // Generic deep scan of the tx (last resort)
+      if (candidates.length === 0) {
+        const deep = collectAmountsDeep(t);
+        candidates.push(...deep);
+      }
+
+      // Type heuristic for advance
+      const typeStr = (t?.type || t?.kind || t?.note || "").toString().toLowerCase();
+      const isAdvance = typeStr.includes("advance") || typeStr.includes("pre");
+
+      const amt = candidates.length ? Math.max(...candidates) : 0;
+      if (amt > 0 && ((okStatus && !badStatus) || isAdvance)) {
+        paid += amt;
+      }
+    }
+  }
+
+  // 2b) Top-level fallbacks
+  const toppers = [
+    o?.paid, o?.advance, o?.advancePaid, o?.advance_amount, o?.advanceAmount, o?.prepaid, o?.prepaidAmount
+  ].map(toNum).filter(n => n > 0);
+  if (toppers.length) {
+    const topAmt = Math.max(...toppers);
+    if (paid < topAmt) paid = topAmt;
+  }
+
+  // 2c) Absolute last-resort: scan the whole order for "amount"/"paid" numbers
+  if (paid <= 0) {
+    const deepAll = collectAmountsDeep(o);
+    if (deepAll.length) paid = Math.max(...deepAll);
+  }
+
+  if (total > 0 && paid > total) paid = total;
+  const due = Math.max(0, total - paid);
+  return { paid, total, due };
+}
+
+
+
+// --- API: GET (list paid pre-orders) ----------------------------
+/*__OLD__*/ export async function GET_OLD(req) {
+  const url = new URL(req.url);
+  const debug = url.searchParams.get('debug') === '1';
+  await ensureDB();
+  const Order = await loadOrderModel();
+  const Product = await loadProductModel();
+
+  const list = await Order.find(
+    { $or: [
+      { isPreOrder: true }, { isPreorder: true }, { preorder: true }, { preOrder: true },
+      { type: "preorder" }, { orderType: "preorder" }, { order_kind: "preorder" }, { orderKind: "preorder" },
+      { category: "preorder" }, { orderCategory: "preorder" }
+    ] }
+  ).sort({ createdAt: -1 }).lean();
+
+  const out = [];
+  for (const o of list) {
+    const { paid, total, due } = computeTotals(o);
+    // UddoktaPay verification (server-side authoritative)
+    let verifiedPaid = paid > 0;
+    const invoiceId = findInvoiceId(o);
+    if (invoiceId) {
+      const ver = await verifyUddokta(invoiceId);
+      if (ver && String(ver.status).toUpperCase() === "COMPLETED") {
+        // prefer charged_amount or amount from verify API
+        const amt = Number(ver.charged_amount ?? ver.amount ?? 0) || 0;
+        if (amt > 0) {
+          paid = amt;
+          verifiedPaid = true;
+        }
+      }
+    }
+
+    const meta = deriveProductMeta(o);
+    if ((!meta.productImage || !meta.productTitle) && Product) {
+      let p = null;
+      if (meta.productId) {
+        try {
+          p = await Product.findById(meta.productId, { images: 1, title: 1, name: 1, slug: 1 }).lean();
+        } catch {}
+      }
+      if (!p && meta.slug) {
+        try {
+          p = await Product.findOne({ slug: meta.slug }, { images: 1, title: 1, name: 1, slug: 1 }).lean();
+        } catch {}
+      }
+      if (p) {
+        meta.productImage = meta.productImage || p.images?.[0] || "";
+        meta.productTitle = meta.productTitle || p.title || p.name || meta.slug || "";
+        meta.slug = meta.slug || p.slug || "";
+      }
+    }
+
+    out.push({
+      ...(debug ? { _rawPayments: o.payments ?? null, _rawTransactions: o.transactions ?? null } : {}),
+      _id: String(o._id),
+      createdAt: o.createdAt ?? null,
+      name: o.name || "",
+      phone: o.phone || "",
+      address: o.address || "",
+      city: o.city || "",
+      productTitle: meta.productTitle || "",
+      productImage: meta.productImage || "",
+      slug: meta.slug || "",
+      total, paid, due,
+      status: o.status || "approved",
+      verifiedPaid
+    });
+  }
+
+  return NextResponse.json({ ok: true, data: out });
+}
+
+
+// --- API: PUT (update status) ----------------------------------
+export async function PUT(req) {
+  try {
+    await ensureDB();
+    const Order = await loadOrderModel();
+
+    const { id, status } = await req.json();
+    if (!id || !status) {
+      return NextResponse.json({ ok: false, error: "Missing id or status" }, { status: 400 });
+    }
+    const updated = await Order.findByIdAndUpdate(id, { $set: { status } }, { new: true, strict: false });
+    if (!updated) {
+      return NextResponse.json({ ok: false, error: "Order not found" }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, data: { _id: String(updated._id), status: updated.status } });
+  } catch (e) {
+    console.error("PUT /api/admin/preorder/orders error:", e);
+    return NextResponse.json({ ok: false, error: "Failed to update" }, { status: 500 });
+  }
+}
+
+
+// --- patched GET with invoiceId & paid flags ---
+
+export async function GET(req){
+  const { NextResponse } = await import('next/server');
+  try{
+    const url = new URL(req.url);
+    const debug = url.searchParams.get('debug') === '1';
+    await ensureDB();
+
+    // Pull only preorder orders; existing code may have a helper or different filter name; try multiple fields.
+    const Order = (await import('../../../../../models/Order')).default;
+    const docs = await Order.find({ $or: [{ isPreorder: true }, { 'preorder.advanceDue': { $gt: 0 } }] })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const list = docs.map((o) => {
+      const po = o.preorder || {};
+      const invoiceId = (typeof getLikelyInvoiceId === 'function')
+        ? getLikelyInvoiceId(o)
+        : (po.uddoktaInvoiceId || o?.payment?.invoice_id || o?.metadata?.invoice_id || null);
+
+      const paid = !!po?.verified && (po?.advancePaid || 0) > 0 && (po?.uddoktaStatus === 'PAID' || true);
+
+      return {
+        id: String(o._id),
+        createdAt: o.createdAt,
+        customer: o.customer || null,
+        itemsCount: Array.isArray(o.items) ? o.items.length : 0,
+        advanceDue: Number(po.advanceDue || 0),
+        advancePaid: Number(po.advancePaid || 0),
+        paid,
+        verified: !!po?.verified,
+        uddoktaStatus: po?.uddoktaStatus || (paid ? 'PAID' : 'PENDING'),
+        invoiceId,
+        ...(debug ? { raw: o } : {}),
+      };
+    });
+
+    return NextResponse.json({ ok: true, orders: list });
+  }catch(err){
+    console.error('admin preorder orders GET failed', err);
+    const { NextResponse } = await import('next/server');
+    return NextResponse.json({ ok:false, error: String(err?.message || err) }, { status: 500 });
+  }
+}
+
