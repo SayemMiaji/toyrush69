@@ -1,0 +1,44 @@
+
+/* Inline trust badges (minimal capsules) */
+.inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  align-items: center;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 9999px;
+  border: 1px solid rgba(0,0,0,0.18);
+  background: transparent;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.pill:hover {
+  border-color: rgba(0,0,0,0.26);
+}
+
+.dark .pill {
+  border-color: rgba(255,255,255,0.22);
+}
+
+.icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.text {
+  font-weight: 600;
+}
+
+/* Small screens */
+@media (max-width: 640px) {
+  .inline { gap: 8px; }
+  .pill { padding: 7px 10px; font-size: 13px; }
+  .icon { font-size: 15px; }
+}
