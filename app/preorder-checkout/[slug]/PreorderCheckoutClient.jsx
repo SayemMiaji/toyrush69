@@ -1,0 +1,258 @@
+'use client'
+import { useEffect, useMemo, useState } from 'react'
+import Image from 'next/image'
+import Link from 'next/link'
+
+function parseBDT(v){
+  if (v == null) return 0
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0
+  if (typeof v === 'string'){
+    const n = Number(v.replace(/[^0-9.]/g, ''))
+    return Number.isFinite(n) ? n : 0
+  }
+  return 0
+}
+
+export default function PreorderCheckoutClient({ slug }){
+  const [loading, setLoading] = useState(true)
+  const [product, setProduct] = useState(null)
+  const [settings, setSettings] = useState({
+    preOrderDefaultAdvancePercent: 50,
+    bkashEnabled: false,
+    uddoktaPayEnabled: false
+  })
+  const [sitePay, setSitePay] = useState({ bkashEnabled:false, uddoktaPayEnabled:false })
+
+  const [qty, setQty] = useState(1)
+  const [name, setName] = useState('')
+  const [phone, setPhone] = useState('')
+  const [email, setEmail] = useState('')
+  const [city, setCity] = useState('')
+  const [address, setAddress] = useState('')
+  const [message, setMessage] = useState('')
+  const [placing, setPlacing] = useState(false)
+
+  useEffect(()=>{
+    let alive = true
+    async function boot(){
+      try{
+        const [pRes, sRes] = await Promise.all([
+          fetch(`/api/products/${slug}`),
+          fetch(`/api/public/site-settings`)
+        ])
+        const pJson = await pRes.json().catch(()=>({}))
+        if(!pRes.ok || !pJson?.product){
+          if(alive) setMessage('Product not found')
+          return
+        }
+        const sJson = await sRes.json().catch(()=>({}))
+        const sData = (sJson?.ok ? sJson.data : sJson?.settings) || {}
+        if(alive){
+          setProduct(pJson.product)
+          setSettings(sData)
+          setSitePay({ bkashEnabled: !!sData.bkashEnabled, uddoktaPayEnabled: !!sData.uddoktaPayEnabled })
+        }
+      }catch(e){
+        if(alive) setMessage(e.message || 'Failed to load')
+      }finally{
+        if(alive) setLoading(false)
+      }
+    }
+    boot()
+    return ()=>{ alive = false }
+  }, [slug])
+
+  const unit = useMemo(()=>parseBDT(product?.price), [product])
+  const subtotal = useMemo(()=>Math.max(0, unit * qty), [unit, qty])
+  const deliveryFee = 60;
+  const total = useMemo(()=> subtotal + deliveryFee, [subtotal, deliveryFee])
+  const advancePercent = useMemo(()=>{
+    if(product?.preOrderAdvancePercent != null) return Number(product.preOrderAdvancePercent) || 50
+    return Number(settings?.preOrderDefaultAdvancePercent) || 50
+  }, [product, settings])
+  const advance = useMemo(()=> Math.round(total * advancePercent / 100), [total, advancePercent])
+  const due = useMemo(()=> Math.max(0, total - advance), [total, advance])
+
+  if(loading){
+    return <div className="py-12 text-center">Loading…</div>
+  }
+  if(!product){
+    return <div className="py-12 text-center">Product not found</div>
+  }
+
+  async function createPreorder(){
+    const body = {
+      slug,
+      email: (email && email.includes("@") ? email : (phone ? `${String(phone).replace(/\\D/g,'')}@toyrush.local` : 'customer@toyrush.local')),
+      qty,
+      name,
+      phone,
+      address,
+      city,
+      delivery: city?.toLowerCase().includes('dhaka') ? 'inside' : 'outside',
+      subtotal,
+      deliveryFee,
+      total,
+      preOrderAdvancePercent: advancePercent,
+      advanceAmount: advance,
+      dueOnDelivery: due,
+    }
+    const res = await fetch('/api/preorders', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify(body)
+    })
+    const data = await res.json().catch(()=>({}))
+    if(!res.ok || !data?.id){
+      throw new Error(data?.error || 'Failed to create pre‑order')
+    }
+    return data.id
+  }
+
+  async function placeOrder(e){  e.preventDefault();
+
+  if(!address || !address.trim()){ setMessage("Address is required"); return; }
+    e.preventDefault()
+    try{
+      setPlacing(true)
+      const orderId = await createPreorder()
+      // Kick off bKash create and redirect
+      const res = await fetch('/api/payments/bkash/create', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ orderId, full_name: name, email, amount: String(advance), metadata: { phone, address, city, slug, qty } })
+      })
+      const data = await res.json().catch(()=>({}))
+      if(!res.ok || !data?.bkashURL){
+        throw new Error(data?.error || 'Failed to initialize bKash payment')
+      }
+      window.location.href = data.bkashURL
+    }catch(e){
+      setMessage(e.message || 'Failed to place order')
+    }finally{
+      setPlacing(false)
+    }
+  }
+
+  async function handleUddoktaPay(){
+  if(!address || !address.trim()){ setMessage("Address is required"); return; }
+  try{
+    setPlacing(true);
+    const orderId = await createPreorder();
+    // Create UddoktaPay session and redirect immediately
+    const res = await fetch('/api/payments/uddoktapay/create', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ orderId })
+    });
+    const data = await res.json().catch(()=>({}));
+    if (!res.ok || !data?.url){
+      throw new Error(data?.error || 'Failed to initialize UddoktaPay');
+    }
+    // Use replace for a snappier transition (no history entry)
+    window.location.replace(data.url);
+  }catch(e){
+    setMessage(e?.message || 'Failed to start payment');
+    setPlacing(false);
+  }
+}
+  return (
+    <div className="py-6">
+      <h1 className="text-2xl font-semibold">Pre‑order Checkout</h1>
+
+      <form onSubmit={placeOrder} className="mt-4 grid gap-6 md:grid-cols-3">
+        <div className="md:col-span-2 space-y-4">
+          <section className="rounded-xl border border-black/10 p-4 text-sm dark:border-white/10">
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="grid gap-1 md:col-span-2">
+                <label className="text-xs">Full name</label>
+                <input value={name} onChange={e=>setName(e.target.value)} required className="rounded-xl border border-black/10 bg-white/70 px-3 py-2 text-sm dark:border-white/10 dark:bg-black/60" />
+              </div>
+              <div className="grid gap-1">
+                <label className="text-xs">Email</label>
+                <input type="email" value={email} onChange={e=>setEmail(e.target.value)} required placeholder="you@example.com" className="rounded-xl border border-black/10 bg-white/70 px-3 py-2 text-sm dark:border-white/10 dark:bg-black/60" />
+              </div>
+              <div className="grid gap-1">
+                <label className="text-xs">Phone</label>
+                <input value={phone} onChange={e=>setPhone(e.target.value)} required placeholder="01XXXXXXXXX" className="rounded-xl border border-black/10 bg-white/70 px-3 py-2 text-sm dark:border-white/10 dark:bg-black/60" />
+              </div>
+              <div className="grid gap-1">
+                <label className="text-xs">City</label>
+                <input value={city} onChange={e=>setCity(e.target.value)} className="rounded-xl border border-black/10 bg-white/70 px-3 py-2 text-sm dark:border-white/10 dark:bg-black/60" />
+              </div>
+              <div className="grid gap-1 md:col-span-2">
+                <label className="text-xs">Address</label>
+                <textarea value={address} onChange={e=>setAddress(e.target.value)} rows={2} className="rounded-xl border border-black/10 bg-white/70 px-3 py-2 text-sm dark:border-white/10 dark:bg-black/60" required />
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-black/10 p-4 text-sm dark:border-white/10">
+            <p className="font-medium">Payment</p>
+            <label className="mt-2 flex items-center gap-2">
+              <input type="radio" checked readOnly />
+              <span>UddoktaPay (advance {advancePercent}%)</span>
+            </label>
+            <label className="mt-1 flex items-center gap-2 opacity-60">
+              <input type="radio" disabled />
+              <span>Cash on delivery (disabled for pre‑orders)</span>
+            </label>
+          </section>
+
+          {message && (
+            <div className="rounded-xl border border-black/10 p-3 text-sm text-red-600 dark:border-white/10 dark:text-red-400">
+              {message}
+            </div>
+)}
+
+        </div>
+
+        <aside className="space-y-4">
+          <section className="rounded-xl border border-black/10 p-4 text-sm dark:border-white/10">
+            <div className="flex items-start gap-3">
+              <div className="relative h-16 w-16 overflow-hidden rounded-lg border border-black/10 dark:border-white/10">
+                {product.images?.[0] && <Image src={product.images[0]} alt={product.name} fill className="object-cover" />}
+              </div>
+              <div className="flex-1">
+                <div className="font-medium">{product.name}</div>
+                <div className="text-xs opacity-80">Unit price: ৳{unit}</div>
+                <div className="mt-1 flex items-center gap-2">
+                  <span className="text-xs">Qty</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={qty}
+                    onChange={e=>setQty(Math.max(1, Number(e.target.value)||1))}
+                    className="w-20 rounded-xl border border-black/10 bg-white/70 px-3 py-1 text-sm dark:border-white/10 dark:bg-black/60"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-1">
+              <div className="flex items-center justify-between"><span>Subtotal</span><span>৳{subtotal}</span></div>
+              <div className="flex items-center justify-between"><span>Delivery fee</span><span>৳{deliveryFee}</span></div>
+              <div className="h-px bg-black/10 dark:bg-white/10 my-2" />
+              <div className="flex items-center justify-between font-medium"><span>Total amount</span><span>৳{total}</span></div>
+              <div className="flex items-center justify-between"><span>Payable now ({advancePercent}%)</span><span className="font-semibold">৳{advance}</span></div>
+              <div className="flex items-center justify-between"><span>Due as COD</span><span>৳{due}</span></div>
+            </div>
+
+            
+              <button
+                type="button"
+                onClick={handleUddoktaPay}
+                className="mt-3 w-full rounded-xl border border-black/10 bg-black px-4 py-2 font-medium text-white hover:opacity-90 disabled:opacity-50 dark:border-white/10 dark:bg-white dark:text-black"
+              >
+                Pay Advance with Uddokta Pay
+              </button>
+            
+
+            <Link href={`/product/${product.slug}`} className="mt-2 block text-center text-sm opacity-80 hover:opacity-100">Back</Link>
+          </section>
+        </aside>
+      </form>
+    </div>
+  )
+}
