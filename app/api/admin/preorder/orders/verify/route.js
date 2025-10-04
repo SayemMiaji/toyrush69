@@ -31,6 +31,12 @@ export async function POST(req){
     order.preorder.verified = true;
     order.preorder.uddoktaStatus = 'PAID';
     order.preorder.txnId = data?.transaction_id || data?.trx_id || null;
+    // Ensure TTL doesn't delete a paid order
+    order.paymentStatus = 'paid';
+    order.paymentProvider = 'uddoktapay';
+    order.transactionId = data?.transaction_id || data?.trx_id || order.transactionId || null;
+    order.advanceAmount = order.preorder?.advancePaid || order.advanceAmount || 0;
+    order.paymentHoldUntil = undefined;
     await order.save();
   }
   return NextResponse.json({ ok:true, verified: isPaid, data });
