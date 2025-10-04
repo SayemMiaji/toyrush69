@@ -1,3 +1,5 @@
+import dynamic from 'next/dynamic';
+const PopupModal = dynamic(()=>import('./components/PopupModal'), { ssr:false });
 import Link from 'next/link'
 import { dbConnect } from '@/lib/db'
 import Product from '@/models/Product'
@@ -190,3 +192,6 @@ export default async function Home(){
 </div>
   )
 }
+
+{/* Popup */}
+<PopupModal />

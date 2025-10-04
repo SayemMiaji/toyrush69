@@ -1123,3 +1123,134 @@ function QAAdmin(){
     </div>
   )
 }
+
+// -- Popup Admin (create/edit) --
+function PopupAdmin(){
+  const [list, setList] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  async function load(){
+    const r = await fetch('/api/admin/popups', { cache:'no-store' });
+    const j = await r.json();
+    setList(j?.data||[]);
+  }
+  useEffect(()=>{ load(); }, []);
+
+  async function save(e){
+    e.preventDefault();
+    setSaving(true);
+    const fd = new FormData(e.currentTarget);
+    const data = Object.fromEntries(fd.entries());
+    data.active = !!data.active;
+    data.dismissible = !!data.dismissible;
+    if (data.startAt) data.startAt = new Date(data.startAt).toISOString();
+    if (data.endAt) data.endAt = new Date(data.endAt).toISOString();
+    await fetch('/api/admin/popups', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body: JSON.stringify({ ...(editing||{}), ...data })
+    });
+    setSaving(false);
+    setEditing(null);
+    load();
+  }
+
+  async function remove(id){
+    if (!confirm('Delete this popup?')) return;
+    await fetch('/api/admin/popups/'+id, { method:'DELETE' });
+    load();
+  }
+
+  async function handleImagePick(e){
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    const r = await fetch('/api/admin/upload', { method:'POST', body: form });
+    const j = await r.json();
+    if (j?.url) {
+      setEditing(prev => ({ ...(prev||{}), imageUrl: j.url }));
+    } else {
+      alert('Upload failed');
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div className="text-sm text-neutral-600 dark:text-neutral-400">{list.length} popup(s)</div>
+        <button type="button" onClick={()=>setEditing({ title:'', imageUrl:'', linkUrl:'', active:false, dismissible:true })} className="rounded-lg border px-3 py-1 text-xs">New Popup</button>
+      </div>
+      <div className="divide-y divide-black/5 dark:divide-white/10 rounded-xl border border-black/10 dark:border-white/10">
+        {list.map(p => (
+          <div key={p._id} className="flex items-center justify-between gap-3 p-3">
+            <div className="flex items-center gap-3">
+              <img src={p.imageUrl} alt="" className="h-12 w-12 rounded-lg border border-black/10 object-cover dark:border-white/10" />
+              <div>
+                <div className="font-medium">{p.title||'(no title)'}</div>
+                <div className="text-xs text-neutral-600 dark:text-neutral-400">{p.active ? 'Active' : 'Inactive'}{p.startAt?` · from ${new Date(p.startAt).toLocaleString()}`:''}{p.endAt?` · until ${new Date(p.endAt).toLocaleString()}`:''}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={()=>setEditing(p)} className="rounded-lg border px-3 py-1 text-xs">Edit</button>
+              <button type="button" onClick={()=>remove(p._id)} className="rounded-lg border px-3 py-1 text-xs">Delete</button>
+            </div>
+          </div>
+        ))}
+        {!list.length && <div className="p-3 text-sm text-neutral-500">No popups yet.</div>}
+      </div>
+
+      {editing && (
+        <form onSubmit={save} className="space-y-4 rounded-xl border border-black/10 p-4 dark:border-white/10">
+          <input type="hidden" name="_id" defaultValue={editing?._id||''} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="text-xs">Title</label>
+              <input name="title" defaultValue={editing?.title||''} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm dark:bg-neutral-900" />
+            </div>
+            <div>
+              <label className="text-xs">Link URL (optional)</label>
+              <input name="linkUrl" defaultValue={editing?.linkUrl||''} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm dark:bg-neutral-900" />
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="text-xs">Start at (optional)</label>
+              <input type="datetime-local" name="startAt" defaultValue={editing?.startAt? new Date(editing.startAt).toISOString().slice(0,16): ''} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm dark:bg-neutral-900" />
+            </div>
+            <div>
+              <label className="text-xs">End at (optional)</label>
+              <input type="datetime-local" name="endAt" defaultValue={editing?.endAt? new Date(editing.endAt).toISOString().slice(0,16): ''} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm dark:bg-neutral-900" />
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="text-xs">Image URL</label>
+              <input name="imageUrl" value={editing?.imageUrl||''} onChange={e=>setEditing(prev=>({...prev, imageUrl:e.target.value}))} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm dark:bg-neutral-900" />
+              <div className="mt-2 flex items-center gap-2">
+                <input type="file" accept="image/*" onChange={handleImagePick} />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" name="active" defaultChecked={!!editing?.active} /> Active</label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" name="dismissible" defaultChecked={editing?.dismissible!==false} /> Dismissible</label>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={()=>setEditing(null)} className="rounded-lg border px-3 py-2 text-sm">Cancel</button>
+            <button type="submit" disabled={saving} className="rounded-lg border px-3 py-2 text-sm">{saving?'Saving...':'Save popup'}</button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+
+{/* ===== Home Popups ===== */}
+<Section title="Home Popups">
+  <PopupAdmin />
+</Section>
